@@ -1,8 +1,9 @@
 """Jev Playground: put things in boxes, ask typed questions, read the probabilities.
 
-Bring your own key. Keys are used for the request you make and are never stored
-or logged. On a private duplicate of this Space you can instead set the secrets
-TYPESAFE_API_KEY / OPENROUTER_API_KEY.
+Bring your own key, pasted once per device: it is kept in this browser's
+localStorage (same scheme as blankaiarena and openrouter-claude), sent with each
+request, and never stored or logged by the Space. On a private duplicate you can
+instead set the secrets TYPESAFE_API_KEY / OPENROUTER_API_KEY.
 """
 
 from __future__ import annotations
@@ -26,7 +27,8 @@ DEFAULT_PRESET = "Theories of consciousness"
 
 # --- helpers -------------------------------------------------------------------
 
-def resolve_key(backend: str, key: str) -> str:
+def resolve_key(backend: str, ts_key: str, or_key: str) -> str:
+    key = ts_key if backend == TS_NAME else or_key
     return (key or "").strip() or os.environ.get(ENV_KEYS[backend], "")
 
 
@@ -96,9 +98,9 @@ def cell(v, txt):
 
 # --- actions -------------------------------------------------------------------
 
-def refresh_models(backend, key):
+def refresh_models(backend, ts_key, or_key):
     try:
-        models = BACKENDS[backend].list_models(resolve_key(backend, key))
+        models = BACKENDS[backend].list_models(resolve_key(backend, ts_key, or_key))
     except Exception as e:
         raise gr.Error(f"Could not list models: {e}")
     default = "jev-latest" if "jev-latest" in models else (models[0] if models else None)
@@ -118,7 +120,7 @@ def show_boxes(n):
     return [gr.update(visible=i < int(n)) for i in range(MAX_CANDIDATES)]
 
 
-def run_pick(backend, key, model, context, n, question, *boxes):
+def run_pick(backend, ts_key, or_key, model, context, n, question, *boxes):
     cands = parse_candidates(boxes, n)
     if len(cands) < 2:
         raise gr.Error("Fill in at least two candidate boxes.")
@@ -127,7 +129,7 @@ def run_pick(backend, key, model, context, n, question, *boxes):
     state = {"shared_context": context.strip()} if context.strip() else "Choose among the options."
     request = {"state": state, "model": model, "questions": {"pick": q}}
     try:
-        res = BACKENDS[backend].ask(resolve_key(backend, key), model, state, {"pick": q})
+        res = BACKENDS[backend].ask(resolve_key(backend, ts_key, or_key), model, state, {"pick": q})
     except BackendError as e:
         raise gr.Error(str(e))
     a = res["answers"]["pick"]
@@ -136,7 +138,7 @@ def run_pick(backend, key, model, context, n, question, *boxes):
     return bars_html(question, a["probabilities"], note), redact(request), redact(res)
 
 
-def run_matrix(backend, key, model, context, n, criteria_text, kind, levels_text, *boxes):
+def run_matrix(backend, ts_key, or_key, model, context, n, criteria_text, kind, levels_text, *boxes):
     cands = parse_candidates(boxes, n)
     crits = parse_criteria(criteria_text)
     if not cands or not crits:
@@ -151,7 +153,7 @@ def run_matrix(backend, key, model, context, n, criteria_text, kind, levels_text
         return {"type": "noul", "instructions": c["question"]}
 
     questions = {f"c{i + 1}": q_for(c) for i, c in enumerate(crits)}
-    key = resolve_key(backend, key)
+    key = resolve_key(backend, ts_key, or_key)
 
     def one(cand):
         state = {"candidate": cand}
@@ -204,7 +206,7 @@ def run_matrix(backend, key, model, context, n, criteria_text, kind, levels_text
     return table, redact(request) + f"\n\n// ...and {len(cands) - 1} more like this, one per candidate", redact(all_res)
 
 
-def run_single(backend, key, model, state_text, qtype, instructions, options_text, t_true, t_false):
+def run_single(backend, ts_key, or_key, model, state_text, qtype, instructions, options_text, t_true, t_false):
     try:
         state = json.loads(state_text)
     except (json.JSONDecodeError, TypeError):
@@ -225,7 +227,7 @@ def run_single(backend, key, model, state_text, qtype, instructions, options_tex
         q = {"type": "score", "instructions": instructions, "criteria": levels}
     request = {"state": state, "model": model, "questions": {"q": q}}
     try:
-        res = BACKENDS[backend].ask(resolve_key(backend, key), model, state, {"q": q})
+        res = BACKENDS[backend].ask(resolve_key(backend, ts_key, or_key), model, state, {"q": q})
     except BackendError as e:
         raise gr.Error(str(e))
     a = res["answers"]["q"]
@@ -273,7 +275,7 @@ INTRO = """
 Put things in boxes, ask **typed questions**, get **probabilities** back.
 [Jev](https://docs.typesafe.ai) (TypeSafe) is a *System One* model: it doesn't write text, it answers
 `noul` (P(yes)), `choice` (distribution over your options) or `score` (position on your rubric).
-Bring your own key — it is used for your request only and never stored.
+Bring your own key: paste it once on each device and this browser remembers it (untick to keep it for this visit only).
 """
 
 HOW = """
@@ -313,17 +315,46 @@ with weights *you* choose and can argue about.
   request — it uses Jev internally but does not expose Jev's typed answers, so it isn't listed here.
 """
 
+# Same per-device scheme as blankaiarena / openrouter-claude: localStorage, remembered by
+# default, with a forget button. Every access is wrapped: storage can be blocked.
+LOAD_KEYS_JS = """() => {
+  const get = k => { try { return localStorage.getItem(k) || ''; } catch { return ''; } };
+  return [get('jev.key.typesafe'), get('jev.key.openrouter'), get('jev.remember') !== '0'];
+}"""
+
+SAVE_KEYS_JS = """(ts, orr, remember) => {
+  try {
+    localStorage.setItem('jev.remember', remember ? '1' : '0');
+    for (const [k, v] of [['jev.key.typesafe', ts], ['jev.key.openrouter', orr]]) {
+      if (remember && v && v.trim()) localStorage.setItem(k, v.trim());
+      else localStorage.removeItem(k);
+    }
+  } catch {}
+  return [];
+}"""
+
+FORGET_KEYS_JS = """() => {
+  try { localStorage.removeItem('jev.key.typesafe'); localStorage.removeItem('jev.key.openrouter'); } catch {}
+  return ['', ''];
+}"""
+
 
 with gr.Blocks(title="Jev Playground") as demo:
     gr.Markdown(INTRO)
     with gr.Row(equal_height=True):
         backend = gr.Radio(list(BACKENDS), value=TS_NAME, label="Backend", scale=2)
-        key = gr.Textbox(label="API key", type="password", scale=2,
-                         placeholder="Pasted key is used for this request only")
         model = gr.Dropdown(TypeSafeBackend.fallback_models, value="jev-latest", label="Model",
                             allow_custom_value=True, scale=2,
                             info="Every TypeSafe model is a System One classifier.")
         refresh = gr.Button("↻ List models", scale=1)
+    with gr.Accordion("🔑 Keys — saved in this browser only", open=True) as keys_box:
+        with gr.Row(equal_height=True):
+            ts_key = gr.Textbox(label="TypeSafe key (console.typesafe.ai)", type="password", scale=3)
+            or_key = gr.Textbox(label="OpenRouter key (openrouter.ai/keys) — optional, for comparison",
+                                type="password", scale=3)
+            with gr.Column(scale=2, min_width=180):
+                remember = gr.Checkbox(True, label="Remember my keys on this device")
+                forget = gr.Button("Forget saved keys", size="sm")
 
     with gr.Tabs():
         with gr.Tab("Compare candidates"):
@@ -385,20 +416,28 @@ with gr.Blocks(title="Jev Playground") as demo:
             gr.Markdown(HOW)
 
     # wiring
-    common = [backend, key, model]
-    refresh.click(refresh_models, [backend, key], model)
-    backend.change(refresh_models, [backend, key], model)
+    keys = [ts_key, or_key]
+    common = [backend, *keys, model]
+    refresh.click(refresh_models, [backend, *keys], model)
+    backend.change(refresh_models, [backend, *keys], model)
+    # Keys live in the browser's localStorage, written and read by JS only.
+    for ev in (ts_key.change, or_key.change, remember.change):
+        ev(None, [ts_key, or_key, remember], None, js=SAVE_KEYS_JS)
+    forget.click(None, None, [ts_key, or_key], js=FORGET_KEYS_JS)
     load.click(load_preset, preset, [context, n, criteria, pick_q, *boxes]).then(show_boxes, n, boxes)
     n.change(show_boxes, n, boxes)
     kind.change(lambda k: gr.update(visible=k == "Score"), kind, levels)
     pick_btn.click(run_pick, [*common, context, n, pick_q, *boxes], [pick_out, req_view, res_view])
-    matrix_btn.click(lambda *a: run_matrix(*a[:6], "Score" if a[6] == "Score" else "Noul", *a[7:]),
+    matrix_btn.click(lambda *a: run_matrix(*a[:7], "Score" if a[7] == "Score" else "Noul", *a[8:]),
                      [*common, context, n, criteria, kind, levels, *boxes],
                      [matrix_out, req_view, res_view])
     s_type.change(single_type_changed, s_type, [s_opts, noul_row])
     s_btn.click(run_single, [*common, s_state, s_type, s_instr, s_opts, s_true, s_false],
                 [s_out, s_req, s_res])
     demo.load(load_preset, preset, [context, n, criteria, pick_q, *boxes]).then(show_boxes, n, boxes)
+    demo.load(None, None, [ts_key, or_key, remember], js=LOAD_KEYS_JS).then(
+        lambda ts, orr: gr.update(open=not (ts or orr)), keys, keys_box).then(
+        refresh_models, [backend, *keys], model)
 
 
 if __name__ == "__main__":

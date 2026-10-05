@@ -28,7 +28,10 @@ criteria) and a small support-ticket preset for sanity checks.
 
 ## Keys
 
-Bring your own key: paste it into the page. It is used for your request and is never stored or logged.
+Paste each key once per device. It is saved in that browser's `localStorage`, the same scheme as
+blankaiarena and openrouter-claude: "Remember my keys on this device" is ticked by default, and
+"Forget saved keys" clears them. The Keys panel folds away once a key is saved. Keys are sent with
+each request through the Space, and the Space never stores or logs them.
 
 - **TypeSafe Jev (native):** key from [console.typesafe.ai](https://console.typesafe.ai).
 - **OpenRouter LLM (logprob emulation):** key from [openrouter.ai](https://openrouter.ai/keys).
@@ -36,8 +39,8 @@ Bring your own key: paste it into the page. It is used for your request and is n
   with a single label token, and the probability on each label is read off. This is a comparison
   baseline, not a calibrated classifier.
 
-On a **private** duplicate you can set the Space secrets `TYPESAFE_API_KEY` / `OPENROUTER_API_KEY`
-so you don't have to paste a key. Don't set them on a public Space, because anyone could spend your credit.
+Alternatively, on a **private** duplicate you can set the Space secrets `TYPESAFE_API_KEY` /
+`OPENROUTER_API_KEY`. Don't set them on a public Space, because anyone could spend your credit.
 
 ## Caveat
 
