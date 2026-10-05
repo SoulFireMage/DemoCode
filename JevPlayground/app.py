@@ -1,9 +1,10 @@
 """Jev Playground: put things in boxes, ask typed questions, read the probabilities.
 
-Bring your own key, pasted once per device: it is kept in this browser's
+One OpenRouter key does everything: Jev (and the other decision models) are billed
+to your OpenRouter credits. Paste it once per device: it is kept in this browser's
 localStorage (same scheme as blankaiarena and openrouter-claude), sent with each
 request, and never stored or logged by the Space. On a private duplicate you can
-instead set the secrets TYPESAFE_API_KEY / OPENROUTER_API_KEY.
+instead set the secrets OPENROUTER_API_KEY / TYPESAFE_API_KEY.
 """
 
 from __future__ import annotations
@@ -16,20 +17,26 @@ from concurrent.futures import ThreadPoolExecutor
 
 import gradio as gr
 
-from backends import BACKENDS, BackendError, OpenRouterEmulation, TypeSafeBackend
+from backends import BACKENDS, BackendError, OpenRouterDecisions, OpenRouterEmulation, TypeSafeBackend
 from presets import PRESETS, SCORE_LEVELS_DEFAULT
 
 MAX_CANDIDATES = 10
-TS_NAME, OR_NAME = TypeSafeBackend.name, OpenRouterEmulation.name
-ENV_KEYS = {TS_NAME: "TYPESAFE_API_KEY", OR_NAME: "OPENROUTER_API_KEY"}
+DEC_NAME, EMU_NAME, TS_NAME = OpenRouterDecisions.name, OpenRouterEmulation.name, TypeSafeBackend.name
+ENV_KEYS = {"typesafe": "TYPESAFE_API_KEY", "openrouter": "OPENROUTER_API_KEY"}
+MODEL_INFO = {
+    DEC_NAME: "OpenRouter models whose output is typed decisions, i.e. genuine classifiers.",
+    EMU_NAME: "{n} chat models that expose token logprobs, so they can imitate a classifier.",
+    TS_NAME: "Jev models served directly by TypeSafe.",
+}
 DEFAULT_PRESET = "Theories of consciousness"
 
 
 # --- helpers -------------------------------------------------------------------
 
 def resolve_key(backend: str, ts_key: str, or_key: str) -> str:
-    key = ts_key if backend == TS_NAME else or_key
-    return (key or "").strip() or os.environ.get(ENV_KEYS[backend], "")
+    kind = BACKENDS[backend].key_kind
+    key = ts_key if kind == "typesafe" else or_key
+    return (key or "").strip() or os.environ.get(ENV_KEYS[kind], "")
 
 
 def parse_candidates(boxes, n):
@@ -92,6 +99,11 @@ def bars_html(title, probs: dict, note=""):
             f'{"".join(rows)}<div class="jp-note">{note}</div></div>')
 
 
+def conf_txt(a):
+    c = a.get("confidence")
+    return f"confidence {c:.2f}" if c is not None else "confidence not reported"
+
+
 def cell(v, txt):
     return f'<td class="jp-cell" style="background:rgba(229,81,186,{0.08 + 0.72 * v:.2f})">{txt}</td>'
 
@@ -103,10 +115,10 @@ def refresh_models(backend, ts_key, or_key):
         models = BACKENDS[backend].list_models(resolve_key(backend, ts_key, or_key))
     except Exception as e:
         raise gr.Error(f"Could not list models: {e}")
-    default = "jev-latest" if "jev-latest" in models else (models[0] if models else None)
-    info = (f"{len(models)} models expose token logprobs, so they can imitate a classifier."
-            if backend == OR_NAME else "Every TypeSafe model is a System One classifier.")
-    return gr.update(choices=models, value=default, info=info)
+    values = [m[1] if isinstance(m, tuple) else m for m in models]
+    preferred = BACKENDS[backend].default_model
+    default = preferred if preferred in values else (values[0] if values else None)
+    return gr.update(choices=models, value=default, info=MODEL_INFO[backend].format(n=len(models)))
 
 
 def load_preset(name):
@@ -133,9 +145,12 @@ def run_pick(backend, ts_key, or_key, model, context, n, question, *boxes):
     except BackendError as e:
         raise gr.Error(str(e))
     a = res["answers"]["pick"]
-    note = (f"Top choice <b>{html.escape(a['choice'])}</b> · confidence {a['confidence']:.2f} · "
+    note = (f"Top choice <b>{html.escape(a['choice'])}</b> · {conf_txt(a)} · "
             f"model {html.escape(res['model'])} · usage {html.escape(json.dumps(res['usage']))}")
-    return bars_html(question, a["probabilities"], note), redact(request), redact(res)
+    probs = a.get("probabilities") or {a["choice"]: 1.0}
+    if not a.get("probabilities"):
+        note += " · <b>this model returned only its pick, no distribution</b>"
+    return bars_html(question, probs, note), redact(request), redact(res)
 
 
 def run_matrix(backend, ts_key, or_key, model, context, n, criteria_text, kind, levels_text, *boxes):
@@ -235,10 +250,11 @@ def run_single(backend, ts_key, or_key, model, state_text, qtype, instructions, 
         out = bars_html(instructions, {"yes": a["noul"], "no": 1 - a["noul"]},
                         f"noul = {a['noul']:.3f} (probability the answer is yes)")
     elif a["type"] == "choice":
-        out = bars_html(instructions, a["probabilities"], f"confidence {a['confidence']:.2f}")
+        out = bars_html(instructions, a.get("probabilities") or {a["choice"]: 1.0}, conf_txt(a))
     else:
-        probs = {f"{k}: {a['legend'][k]}": v for k, v in a["probabilities"].items()}
-        out = bars_html(instructions, probs, f"score {a['score']:.2f} · confidence {a['confidence']:.2f}")
+        legend = a.get("legend") or {str(i): lv for i, lv in enumerate(q["criteria"])}
+        probs = {f"{k}: {legend.get(k, '')}": v for k, v in (a.get("probabilities") or {}).items()}
+        out = bars_html(instructions, probs, f"score {a['score']:.2f} · {conf_txt(a)}")
     return out, redact(request), redact(res)
 
 
@@ -275,7 +291,7 @@ INTRO = """
 Put things in boxes, ask **typed questions**, get **probabilities** back.
 [Jev](https://docs.typesafe.ai) (TypeSafe) is a *System One* model: it doesn't write text, it answers
 `noul` (P(yes)), `choice` (distribution over your options) or `score` (position on your rubric).
-Bring your own key: paste it once on each device and this browser remembers it (untick to keep it for this visit only).
+One **OpenRouter key** runs everything, billed to your OpenRouter credits. Paste it once per device and this browser remembers it.
 """
 
 HOW = """
@@ -306,18 +322,33 @@ prediction?", "is it consistent with finding X?") where the evidence is in the s
 with weights *you* choose and can argue about.
 
 ### Backends
-- **TypeSafe Jev (native)** — the real classifier at `api.typesafe.ai`. Key from
-  [console.typesafe.ai](https://console.typesafe.ai). The model list comes from `GET /v1/models`.
-- **OpenRouter LLM (logprob emulation)** — any OpenRouter chat model that exposes token
-  logprobs, forced to answer with one label token; we read the probability on each label.
-  Good for comparison; ordinary LLMs aren't trained for calibrated decisions, and each question is a
-  separate call. Note: OpenRouter's `typesafe/jev-router` is a *router* that picks an LLM for a chat
-  request — it uses Jev internally but does not expose Jev's typed answers, so it isn't listed here.
+- **OpenRouter decision models (default)** — Jev plus the other models OpenRouter tags with the
+  output type `decisions` (Perplexity, Liquid, Cloudflare, Upstage, ...). The list comes live from
+  `GET /api/v1/models?output_modalities=decisions`; requests go to `POST /api/alpha/decisions`.
+  Billed to your OpenRouter credits. Some models leave out `confidence` or the full distribution;
+  confidence is then computed from the probabilities where possible.
+- **OpenRouter chat LLM (logprob imitation)** — any chat model that exposes token logprobs, forced
+  to answer with one label token; we read the probability on each label. A comparison baseline:
+  chat models aren't trained for calibrated decisions, and each question is a separate call.
+- **TypeSafe direct** — Jev from `api.typesafe.ai` with a TypeSafe key (Advanced, in the Keys panel).
+
+(`typesafe/jev-router` is something else again: a router that uses Jev to pick which *chat* model
+answers a chat request.)
 """
 
 # Same per-device scheme as blankaiarena / openrouter-claude: localStorage, remembered by
 # default, with a forget button. Every access is wrapped: storage can be blocked.
+# Two password boxes side by side look like "password + confirm password" to phone password
+# managers, which can take over the second one and block paste. So only one is visible, and
+# both are marked as not-a-login-form for the managers that honour it.
 LOAD_KEYS_JS = """() => {
+  for (const id of ['or-key', 'ts-key']) {
+    const el = document.querySelector(`#${id} input`);
+    if (!el) continue;
+    el.setAttribute('autocomplete', 'off');
+    for (const a of ['data-1p-ignore', 'data-lpignore', 'data-bwignore']) el.setAttribute(a, 'true');
+    el.setAttribute('data-form-type', 'other');
+  }
   const get = k => { try { return localStorage.getItem(k) || ''; } catch { return ''; } };
   return [get('jev.key.typesafe'), get('jev.key.openrouter'), get('jev.remember') !== '0'];
 }"""
@@ -342,19 +373,20 @@ FORGET_KEYS_JS = """() => {
 with gr.Blocks(title="Jev Playground") as demo:
     gr.Markdown(INTRO)
     with gr.Row(equal_height=True):
-        backend = gr.Radio(list(BACKENDS), value=TS_NAME, label="Backend", scale=2)
-        model = gr.Dropdown(TypeSafeBackend.fallback_models, value="jev-latest", label="Model",
-                            allow_custom_value=True, scale=2,
-                            info="Every TypeSafe model is a System One classifier.")
+        backend = gr.Radio(list(BACKENDS), value=DEC_NAME, label="Backend", scale=2, min_width=300)
+        model = gr.Dropdown([("TypeSafe: Jev Latest  ·  ~typesafe/jev-latest", "~typesafe/jev-latest")],
+                            value="~typesafe/jev-latest", label="Model", allow_custom_value=True, scale=2, min_width=300,
+                            info=MODEL_INFO[DEC_NAME])
         refresh = gr.Button("↻ List models", scale=1)
-    with gr.Accordion("🔑 Keys — saved in this browser only", open=True) as keys_box:
+    with gr.Accordion("🔑 Key — saved in this browser only", open=True) as keys_box:
         with gr.Row(equal_height=True):
-            ts_key = gr.Textbox(label="TypeSafe key (console.typesafe.ai)", type="password", scale=3)
-            or_key = gr.Textbox(label="OpenRouter key (openrouter.ai/keys) — optional, for comparison",
-                                type="password", scale=3)
+            or_key = gr.Textbox(label="OpenRouter key (openrouter.ai/settings/keys)", type="password",
+                                elem_id="or-key", scale=3)
             with gr.Column(scale=2, min_width=180):
-                remember = gr.Checkbox(True, label="Remember my keys on this device")
-                forget = gr.Button("Forget saved keys", size="sm")
+                remember = gr.Checkbox(True, label="Remember my key on this device")
+                forget = gr.Button("Forget saved key", size="sm")
+        with gr.Accordion("Advanced: TypeSafe direct key (only for the TypeSafe direct backend)", open=False):
+            ts_key = gr.Textbox(label="TypeSafe key (console.typesafe.ai)", type="password", elem_id="ts-key")
 
     with gr.Tabs():
         with gr.Tab("Compare candidates"):
@@ -436,7 +468,7 @@ with gr.Blocks(title="Jev Playground") as demo:
                 [s_out, s_req, s_res])
     demo.load(load_preset, preset, [context, n, criteria, pick_q, *boxes]).then(show_boxes, n, boxes)
     demo.load(None, None, [ts_key, or_key, remember], js=LOAD_KEYS_JS).then(
-        lambda ts, orr: gr.update(open=not (ts or orr)), keys, keys_box).then(
+        lambda ts, orr: gr.update(open=not orr), keys, keys_box).then(
         refresh_models, [backend, *keys], model)
 
 

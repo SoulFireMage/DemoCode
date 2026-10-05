@@ -1,12 +1,15 @@
-"""Two ways to ask a typed question and get probabilities back.
+"""Three ways to ask a typed question and get probabilities back.
 
-TypeSafeBackend  -> the real thing: Jev via api.typesafe.ai/v1/systemone.
+OpenRouterDecisions -> OpenRouter's decision models (Jev and its relatives),
+    found via GET /models?output_modalities=decisions and called through
+    POST /api/alpha/decisions. Billed to your OpenRouter credits.
 OpenRouterEmulation -> an *imitation* of the same contract using any
-OpenRouter chat model that exposes token logprobs. The model is forced to
-answer with a single label token and we read the probability mass on each
-label. Useful for comparison; it is not calibrated the way Jev is trained to be.
+    OpenRouter chat model that exposes token logprobs. The model is forced to
+    answer with a single label token and we read the probability mass on each
+    label. Useful for comparison; chat models aren't trained to be calibrated.
+TypeSafeBackend -> Jev direct from api.typesafe.ai, for people with a TypeSafe key.
 
-Both return answers in TypeSafe's response shape so the UI does not care
+All return answers in TypeSafe's response shape so the UI does not care
 which one ran.
 """
 
@@ -22,6 +25,7 @@ import requests
 
 TYPESAFE_URL = "https://api.typesafe.ai/v1"
 OPENROUTER_URL = "https://openrouter.ai/api/v1"
+DECISIONS_URL = "https://openrouter.ai/api/alpha/decisions"
 TIMEOUT = 60
 
 
@@ -67,10 +71,56 @@ def score_confidence(probs: list[float]) -> float:
     return max(0.0, min(1.0, 1 - spread / even)) if even else 1.0
 
 
-# --- TypeSafe (Jev) ---------------------------------------------------------
+def complete_answer(a: dict) -> dict:
+    """Decisions answers only promise type + value; fill confidence from the
+    probabilities when a provider leaves it out (None if it can't be known)."""
+    a = dict(a)
+    probs = a.get("probabilities")
+    if a["type"] in ("choice", "score") and a.get("confidence") is None and probs:
+        keys = list(probs)
+        if a["type"] == "score" and all(str(k).isdigit() for k in keys):
+            keys.sort(key=int)
+        vals = [probs[k] for k in keys]
+        a["confidence"] = (score_confidence if a["type"] == "score" else choice_confidence)(vals)
+    return a
+
+
+# --- OpenRouter decision models (Jev and relatives) ----------------------------
+
+class OpenRouterDecisions:
+    name = "OpenRouter decision models (Jev & co.)"
+    key_kind = "openrouter"
+    default_model = "~typesafe/jev-latest"
+
+    def list_models(self, key: str) -> list:
+        """Every OpenRouter model whose output is typed decisions, not text."""
+        r = requests.get(f"{OPENROUTER_URL}/models", params={"output_modalities": "decisions"}, timeout=30)
+        r.raise_for_status()
+        ms = [m for m in r.json()["data"] if "decisions" in (m.get("architecture") or {}).get("output_modalities", [])]
+        ms.sort(key=lambda m: (not m["id"].lstrip("~").startswith("typesafe/"), m["name"]))
+        return [(f'{m["name"]}  ·  {m["id"]}', m["id"]) for m in ms]
+
+    def ask(self, key: str, model: str, state, questions: dict) -> dict:
+        if not key:
+            raise BackendError("An OpenRouter API key is needed (openrouter.ai/settings/keys).")
+        data = _post_with_retry(
+            DECISIONS_URL,
+            {"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
+            {"model": model, "state": state, "questions": questions},
+        )
+        if not isinstance(data.get("answers"), dict):  # OpenRouter can report errors inside a 200
+            raise BackendError(f"{model} returned no answers: {json.dumps(data)[:600]}")
+        return {"model": data.get("model", model), "provider": data.get("provider"),
+                "answers": {k: complete_answer(a) for k, a in data["answers"].items()},
+                "usage": data.get("usage", {})}
+
+
+# --- TypeSafe (Jev) direct ---------------------------------------------------
 
 class TypeSafeBackend:
-    name = "TypeSafe Jev (native)"
+    name = "TypeSafe direct (TypeSafe key)"
+    key_kind = "typesafe"
+    default_model = "jev-latest"
     fallback_models = ["jev-latest", "jev-preview", "jev-1.13.0"]
 
     def list_models(self, key: str) -> list[str]:
@@ -106,7 +156,9 @@ def _fmt(x) -> str:
 
 
 class OpenRouterEmulation:
-    name = "OpenRouter LLM (logprob emulation)"
+    name = "OpenRouter chat LLM (logprob imitation)"
+    key_kind = "openrouter"
+    default_model = None
 
     def list_models(self, key: str) -> list[str]:
         """Models that can stand in for a classifier: text out, logprobs exposed,
@@ -205,4 +257,4 @@ class OpenRouterEmulation:
         return {"model": model, "answers": answers, "usage": {"input_tokens": inp, "calls": len(questions)}}
 
 
-BACKENDS = {b.name: b for b in (TypeSafeBackend(), OpenRouterEmulation())}
+BACKENDS = {b.name: b for b in (OpenRouterDecisions(), OpenRouterEmulation(), TypeSafeBackend())}
